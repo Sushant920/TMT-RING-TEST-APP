@@ -8,6 +8,7 @@ import {
   Dimensions,
   ActivityIndicator,
   Platform,
+  Image,
 } from 'react-native';
 import { CameraView } from 'expo-camera';
 import { useCameraPermissions } from 'expo-camera';
@@ -17,25 +18,23 @@ import * as MediaLibrary from 'expo-media-library';
 
 const { width: screenWidth } = Dimensions.get('window');
 
+// Set your backend URL here
+const BACKEND_URL = 'http://192.168.0.105:5000';
+
 const CameraScreen = ({ route, navigation }) => {
   const { diameter } = route.params;
   const [isCapturing, setIsCapturing] = useState(false);
   const [capturedImage, setCapturedImage] = useState(null);
-  const [facing, setFacing] = useState('back'); // 'back' or 'front'
-  const [flash, setFlash] = useState('off');   // 'off', 'on', 'auto'
+  const [facing, setFacing] = useState('back');
+  const [flash, setFlash] = useState('off');
   const [isCameraReady, setIsCameraReady] = useState(false);
   const cameraRef = useRef(null);
 
-  // Permission hooks
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const [mediaPermission, requestMediaPermission] = MediaLibrary.usePermissions();
 
-  // Handle camera ready event
-  const onCameraReady = () => {
-    setIsCameraReady(true);
-  };
+  const onCameraReady = () => setIsCameraReady(true);
 
-  // Take picture handler
   const takePicture = async () => {
     if (cameraRef.current && !isCapturing && isCameraReady) {
       setIsCapturing(true);
@@ -46,7 +45,7 @@ const CameraScreen = ({ route, navigation }) => {
           exif: true,
         });
         setCapturedImage(photo);
-        processImage(photo);
+        await processImage(photo);
       } catch (error) {
         console.error('Camera error:', error);
         Alert.alert('Error', 'Failed to capture image. Please try again.');
@@ -55,54 +54,59 @@ const CameraScreen = ({ route, navigation }) => {
     }
   };
 
-  // Process image handler
+  // Upload image to backend and navigate to ResultsScreen
   const processImage = async (imageData) => {
     try {
-      // Save image to media library if permission granted
+      // Optionally save to gallery
       if (Platform.OS !== 'web' && mediaPermission?.granted) {
         await MediaLibrary.saveToLibraryAsync(imageData.uri);
       }
-      // Simulate analysis (replace with actual analysis logic)
-      setTimeout(() => {
-        setIsCapturing(false);
-        navigation.navigate('Results', {
-          diameter,
-          imageUri: imageData.uri,
-          analysisData: performAnalysis(diameter),
-        });
-      }, 2000);
+
+      // Prepare FormData for upload
+      const formData = new FormData();
+      formData.append('image', {
+        uri: imageData.uri,
+        type: 'image/jpeg',
+        name: 'photo.jpg',
+      });
+      formData.append('diameter', diameter);
+
+      // Upload to backend
+      const response = await fetch(`${BACKEND_URL}/process-ring-test`, {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to upload image to backend.');
+      }
+
+      const result = await response.json();
+
+      if (!result.test_id) {
+        throw new Error('No test_id returned from backend.');
+      }
+
+      setIsCapturing(false);
+
+      // Navigate to ResultsScreen with testId and imageUri
+      navigation.navigate('Results', {
+        diameter,
+        imageUri: imageData.uri,
+        testId: result.test_id,
+      });
     } catch (error) {
       console.error('Processing error:', error);
-      Alert.alert('Error', 'Failed to process image. Please try again.');
+      Alert.alert('Error', error.message || 'Failed to process image. Please try again.');
       setIsCapturing(false);
     }
   };
 
-  // Dummy analysis function
-  const performAnalysis = (diameter) => {
-    const baseThickness = diameter * 0.08;
-    const variation = (Math.random() * 0.02 - 0.01) * diameter;
-    const actualThickness = baseThickness + variation;
-    const percentage = (actualThickness / diameter) * 100;
-    return {
-      rimThickness: actualThickness.toFixed(2),
-      thicknessPercentage: percentage.toFixed(1),
-      layersDetected: 3,
-      continuousRing: true,
-      concentricRegions: true,
-      uniformThickness: Math.random() > 0.1,
-      withinRange: percentage >= 7 && percentage <= 10,
-    };
-  };
-
-  // Toggle flash handler
   const toggleFlash = () => {
     setFlash(current => (current === 'off' ? 'on' : 'off'));
   };
 
-  // Permission UI logic
   if (!cameraPermission || !mediaPermission) {
-    // Permissions are still loading
     return (
       <View style={styles.container}>
         <ActivityIndicator size="large" color="#0D47A1" />
@@ -112,23 +116,16 @@ const CameraScreen = ({ route, navigation }) => {
   }
 
   if (!cameraPermission.granted || !mediaPermission.granted) {
-    // Permissions not granted yet
     return (
       <View style={styles.container}>
         <Text style={styles.permissionText}>Camera and media permissions are required.</Text>
         {!cameraPermission.granted && (
-          <TouchableOpacity
-            style={styles.permissionButton}
-            onPress={requestCameraPermission}
-          >
+          <TouchableOpacity style={styles.permissionButton} onPress={requestCameraPermission}>
             <Text style={styles.permissionButtonText}>Grant Camera Permission</Text>
           </TouchableOpacity>
         )}
         {!mediaPermission.granted && (
-          <TouchableOpacity
-            style={styles.permissionButton}
-            onPress={requestMediaPermission}
-          >
+          <TouchableOpacity style={styles.permissionButton} onPress={requestMediaPermission}>
             <Text style={styles.permissionButtonText}>Grant Media Permission</Text>
           </TouchableOpacity>
         )}
@@ -136,7 +133,6 @@ const CameraScreen = ({ route, navigation }) => {
     );
   }
 
-  // Main camera UI
   return (
     <View style={styles.container}>
       <CameraView
@@ -148,10 +144,7 @@ const CameraScreen = ({ route, navigation }) => {
         ratio="16:9"
       >
         <View style={styles.overlayContainer}>
-          <LinearGradient
-            colors={['rgba(0,0,0,0.7)', 'transparent']}
-            style={styles.topBar}
-          >
+          <LinearGradient colors={['rgba(0,0,0,0.7)', 'transparent']} style={styles.topBar}>
             <Text style={styles.instructionText}>
               Align TMT bar cross-section with the circle
             </Text>
@@ -159,28 +152,30 @@ const CameraScreen = ({ route, navigation }) => {
           </LinearGradient>
 
           <View style={styles.centerContainer}>
-            <View
-              style={[
-                styles.circleOverlay,
-                {
+            {(diameter === 12 || diameter === 16 || diameter === 20 || diameter === 25) && (
+              <Image
+                source={
+                  diameter === 12
+                    ? require('/Users/sushant/Downloads/TMTRingTestApp/assets/overlays/overlay12.png')
+                    : diameter === 16
+                    ? require('/Users/sushant/Downloads/TMTRingTestApp/assets/overlays/overlay16.png')
+                    : diameter === 20
+                    ? require('/Users/sushant/Downloads/TMTRingTestApp/assets/overlays/overlay20.png')
+                    : require('/Users/sushant/Downloads/TMTRingTestApp/assets/overlays/overlay25.png')
+                }
+                style={{
                   width: screenWidth * 0.7,
                   height: screenWidth * 0.7,
-                  borderRadius: screenWidth * 0.35,
-                },
-              ]}
-            />
-          </View>
-
-          <View style={styles.bottomControls}>
-            <TouchableOpacity
-              style={styles.controlButton}
-              onPress={toggleFlash}
-            >
-              <Icon
-                name={flash === 'on' ? 'flash-on' : 'flash-off'}
-                size={24}
-                color="white"
+                  opacity: 0.5,
+                  resizeMode: 'contain',
+                  position: 'absolute',
+                }}
               />
+            )}
+          </View>
+          <View style={styles.bottomControls}>
+            <TouchableOpacity style={styles.controlButton} onPress={toggleFlash}>
+              <Icon name={flash === 'on' ? 'flash-on' : 'flash-off'} size={24} color="white" />
             </TouchableOpacity>
 
             <TouchableOpacity
@@ -235,11 +230,6 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-  },
-  circleOverlay: {
-    borderWidth: 2,
-    borderColor: '#4CAF50',
-    backgroundColor: 'transparent',
   },
   bottomControls: {
     flexDirection: 'row',

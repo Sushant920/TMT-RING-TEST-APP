@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import {
   View,
   Text,
@@ -7,6 +7,8 @@ import {
   StyleSheet,
   Animated,
   Dimensions,
+  Image,
+  ActivityIndicator,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import Icon from 'react-native-vector-icons/MaterialIcons';
@@ -14,70 +16,115 @@ import Svg, { Circle, Path, Text as SvgText } from 'react-native-svg';
 
 const { width } = Dimensions.get('window');
 
+// CHANGE THIS to your backend's base URL
+const BACKEND_URL = 'http://192.168.0.105:5000';
+
 const ResultsScreen = ({ route, navigation }) => {
-  const { diameter, imageUri, analysisData } = route.params;
+  const { imageUri, testId, diameter } = route.params; // testId and diameter must be passed from previous screen
+
+  const [loading, setLoading] = useState(true);
+  const [analysisData, setAnalysisData] = useState(null);
+  const [error, setError] = useState(null);
+
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const slideAnim = useRef(new Animated.Value(50)).current;
 
+  // Poll backend for results after upload
   useEffect(() => {
-    Animated.parallel([
-      Animated.timing(fadeAnim, {
-        toValue: 1,
-        duration: 800,
-        useNativeDriver: true,
-      }),
-      Animated.timing(slideAnim, {
-        toValue: 0,
-        duration: 600,
-        useNativeDriver: true,
-      }),
-    ]).start();
-  }, []);
+    let isMounted = true;
 
-  const level1Results = {
-    layersDetected: { 
-      status: analysisData.layersDetected === 3 ? 'pass' : 'fail', 
-      value: `${analysisData.layersDetected} layers detected` 
-    },
-    continuousRing: { 
-      status: analysisData.continuousRing ? 'pass' : 'fail', 
-      value: analysisData.continuousRing ? 'Continuous' : 'Discontinuous' 
-    },
-    concentricRegions: { 
-      status: analysisData.concentricRegions ? 'pass' : 'fail', 
-      value: analysisData.concentricRegions ? 'Concentric' : 'Non-concentric' 
-    },
-    uniformThickness: { 
-      status: analysisData.uniformThickness ? 'pass' : 'fail', 
-      value: analysisData.uniformThickness ? 'Uniform' : 'Non-uniform' 
-    },
-  };
+    const fetchResults = async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        let data = null;
+        let attempts = 0;
+        const maxAttempts = 60; // 2 minutes max (60 x 2s)
+        while (attempts < maxAttempts) {
+          const res = await fetch(`${BACKEND_URL}/get-report?test_id=${testId}`);
+          if (!res.ok) throw new Error('Network error');
+          data = await res.json();
+          if (data && !data.processing) break; // Wait until processing is done
+          await new Promise(res => setTimeout(res, 2000));
+          attempts++;
+        }
+        if (attempts === maxAttempts) throw new Error('Processing timed out.');
+        if (isMounted) {
+          setAnalysisData(data);
+          setLoading(false);
+          Animated.parallel([
+            Animated.timing(fadeAnim, {
+              toValue: 1,
+              duration: 800,
+              useNativeDriver: true,
+            }),
+            Animated.timing(slideAnim, {
+              toValue: 0,
+              duration: 600,
+              useNativeDriver: true,
+            }),
+          ]).start();
+        }
+      } catch (err) {
+        if (isMounted) {
+          setError(err.message || 'Failed to fetch results');
+          setLoading(false);
+        }
+      }
+    };
 
-  const level2Results = {
-    rimThickness: { 
-      status: 'info', 
-      value: `${analysisData.rimThickness} mm` 
-    },
-    thicknessPercentage: { 
-      status: analysisData.withinRange ? 'pass' : 'fail', 
-      value: `${analysisData.thicknessPercentage}%` 
-    },
-    withinRange: { 
-      status: analysisData.withinRange ? 'pass' : 'fail', 
-      value: analysisData.withinRange ? '7-10% ✓' : 'Out of range ✗' 
-    },
-    meetsStandards: { 
-      status: analysisData.withinRange && analysisData.uniformThickness ? 'pass' : 'fail', 
-      value: analysisData.withinRange && analysisData.uniformThickness ? 'Yes' : 'No' 
-    },
-  };
+    fetchResults();
+    return () => { isMounted = false; };
+  }, [testId]);
 
-  const overallPass = Object.values(level1Results).every(r => r.status === 'pass') &&
-                     analysisData.withinRange;
-  const overallStatus = overallPass ? 'PASS' : 'FAIL';
+  if (loading) {
+    return (
+      <View style={styles.centered}>
+        <ActivityIndicator size="large" color="#0D47A1" />
+        <Text style={{ marginTop: 16, fontSize: 16 }}>
+          Processing image, please wait...
+        </Text>
+      </View>
+    );
+  }
 
+  if (error) {
+    return (
+      <View style={styles.centered}>
+        <Text style={{ color: 'red', fontSize: 16, marginBottom: 16 }}>
+          {error}
+        </Text>
+        <Text
+          style={styles.retryText}
+          onPress={() => {
+            setLoading(true);
+            setError(null);
+          }}
+        >
+          Tap to retry
+        </Text>
+      </View>
+    );
+  }
+
+  // Expecting backend response like:
+  // {
+  //   processing: false,
+  //   diameter: 16,
+  //   verdict: "PASS",
+  //   level1: { layersDetected: ..., continuousRing: ..., concentricRegions: ..., uniformThickness: ..., status: ... },
+  //   level2: { rimThickness: ..., thicknessPercentage: ..., withinRange: ..., meetsStandards: ..., status: ... },
+  //   images: {
+  //     segmented: "http://.../segmented_image.jpg",
+  //     thickness: "http://.../thickness_image.jpg"
+  //   }
+  // }
+
+  const { verdict, level1, level2, images } = analysisData;
+
+  // Helper for status and value display
   const ResultItem = ({ label, result, icon }) => (
-    <Animated.View 
+    <Animated.View
       style={[
         styles.resultItem,
         {
@@ -92,22 +139,65 @@ const ResultsScreen = ({ route, navigation }) => {
       </View>
       <View style={styles.resultRight}>
         <Text style={[
-          styles.resultValue, 
-          result.status === 'pass' ? styles.pass : result.status === 'fail' ? styles.fail : styles.info
+          styles.resultValue,
+          result.status === 'pass'
+            ? styles.pass
+            : result.status === 'fail'
+            ? styles.fail
+            : styles.info
         ]}>
           {result.value}
         </Text>
         {result.status !== 'info' && (
-          <Icon 
-            name={result.status === 'pass' ? 'check-circle' : 'cancel'} 
-            size={20} 
-            color={result.status === 'pass' ? '#4CAF50' : '#f44336'} 
+          <Icon
+            name={result.status === 'pass' ? 'check-circle' : 'cancel'}
+            size={20}
+            color={result.status === 'pass' ? '#4CAF50' : '#f44336'}
           />
         )}
       </View>
     </Animated.View>
   );
 
+  // Compose level1/level2 results for display
+  const level1Results = {
+    layersDetected: {
+      status: level1.layersDetectedStatus, // 'pass' or 'fail'
+      value: level1.layersDetectedValue,
+    },
+    continuousRing: {
+      status: level1.continuousRingStatus,
+      value: level1.continuousRingValue,
+    },
+    concentricRegions: {
+      status: level1.concentricRegionsStatus,
+      value: level1.concentricRegionsValue,
+    },
+    uniformThickness: {
+      status: level1.uniformThicknessStatus,
+      value: level1.uniformThicknessValue,
+    },
+  };
+  const level2Results = {
+    rimThickness: {
+      status: 'info',
+      value: level2.rimThicknessValue,
+    },
+    thicknessPercentage: {
+      status: level2.thicknessPercentageStatus,
+      value: level2.thicknessPercentageValue,
+    },
+    withinRange: {
+      status: level2.withinRangeStatus,
+      value: level2.withinRangeValue,
+    },
+    meetsStandards: {
+      status: level2.meetsStandardsStatus,
+      value: level2.meetsStandardsValue,
+    },
+  };
+
+  // Visualization (unchanged)
   const LayerVisualization = () => {
     const centerX = 100;
     const centerY = 100;
@@ -138,28 +228,26 @@ const ResultsScreen = ({ route, navigation }) => {
           fill="#BDC3C7"
           opacity={0.9}
         />
-        
         <SvgText x={centerX} y={30} fill="white" fontSize="12" textAnchor="middle">
           Rim (Dark)
         </SvgText>
         <SvgText x={centerX} y={centerY} fill="#2C3E50" fontSize="12" textAnchor="middle">
           Core
         </SvgText>
-        
         <Path
           d={`M ${centerX} ${centerY} L ${centerX + rimRadius} ${centerY}`}
           stroke="#4CAF50"
           strokeWidth="2"
           strokeDasharray="5,5"
         />
-        <SvgText 
-          x={centerX + 45} 
-          y={centerY - 5} 
-          fill="#4CAF50" 
-          fontSize="10" 
+        <SvgText
+          x={centerX + 45}
+          y={centerY - 5}
+          fill="#4CAF50"
+          fontSize="10"
           textAnchor="middle"
         >
-          {analysisData.rimThickness}mm
+          {level2.rimThicknessValue}
         </SvgText>
       </Svg>
     );
@@ -177,20 +265,35 @@ const ResultsScreen = ({ route, navigation }) => {
         ]}
       >
         <LinearGradient
-          colors={overallStatus === 'PASS' ? ['#4CAF50', '#388E3C'] : ['#f44336', '#d32f2f']}
+          colors={verdict === 'PASS' ? ['#4CAF50', '#388E3C'] : ['#f44336', '#d32f2f']}
           style={styles.statusGradient}
         >
-          <Icon 
-            name={overallStatus === 'PASS' ? 'check-circle' : 'cancel'} 
-            size={60} 
-            color="white" 
+          <Icon
+            name={verdict === 'PASS' ? 'check-circle' : 'cancel'}
+            size={60}
+            color="white"
           />
-          <Text style={styles.statusText}>Test Result: {overallStatus}</Text>
+          <Text style={styles.statusText}>Test Result: {verdict}</Text>
           <Text style={styles.diameterInfo}>Bar Diameter: {diameter} mm</Text>
         </LinearGradient>
       </Animated.View>
 
-      <Animated.View 
+      {/* Level 1 Processed Image */}
+      <View style={styles.imageSection}>
+        <Text style={styles.sectionTitle}>Level 1: Segmented Image</Text>
+        {images && images.segmented ? (
+          <Image
+            source={{ uri: images.segmented }}
+            style={styles.processedImage}
+            resizeMode="contain"
+          />
+        ) : (
+          <Text style={styles.value}>No segmented image available.</Text>
+        )}
+      </View>
+
+      {/* Visualization */}
+      <Animated.View
         style={[
           styles.visualizationCard,
           {
@@ -219,6 +322,20 @@ const ResultsScreen = ({ route, navigation }) => {
         <ResultItem label="Thickness Uniformity" result={level1Results.uniformThickness} icon="straighten" />
       </View>
 
+      {/* Level 2 Processed Image */}
+      <View style={styles.imageSection}>
+        <Text style={styles.sectionTitle}>Level 2: Thickness Image</Text>
+        {images && images.thickness ? (
+          <Image
+            source={{ uri: images.thickness }}
+            style={styles.processedImage}
+            resizeMode="contain"
+          />
+        ) : (
+          <Text style={styles.value}>No thickness image available.</Text>
+        )}
+      </View>
+
       <View style={styles.resultsSection}>
         <View style={styles.sectionHeader}>
           <Icon name="straighten" size={24} color="#0D47A1" />
@@ -233,11 +350,13 @@ const ResultsScreen = ({ route, navigation }) => {
       <View style={styles.actionContainer}>
         <TouchableOpacity
           style={styles.primaryButton}
-          onPress={() => navigation.navigate('Report', { 
-            diameter, 
-            results: { level1Results, level2Results, overallStatus },
-            analysisData 
-          })}
+          onPress={() =>
+            navigation.navigate('Report', {
+              diameter,
+              results: { level1Results, level2Results, verdict },
+              analysisData,
+            })
+          }
         >
           <LinearGradient
             colors={['#0D47A1', '#1976D2']}
@@ -247,7 +366,7 @@ const ResultsScreen = ({ route, navigation }) => {
             <Text style={styles.buttonText}>Generate Report</Text>
           </LinearGradient>
         </TouchableOpacity>
-        
+
         <TouchableOpacity
           style={styles.secondaryButton}
           onPress={() => navigation.navigate('DiameterSelection')}
@@ -261,10 +380,8 @@ const ResultsScreen = ({ route, navigation }) => {
 };
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#F5F5F5',
-  },
+  container: { flex: 1, backgroundColor: '#F5F5F5' },
+  centered: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#F5F5F5' },
   statusCard: {
     margin: 20,
     borderRadius: 20,
@@ -275,21 +392,9 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.3,
     shadowRadius: 8,
   },
-  statusGradient: {
-    padding: 30,
-    alignItems: 'center',
-  },
-  statusText: {
-    fontSize: 24,
-    fontWeight: 'bold',
-    color: 'white',
-    marginTop: 10,
-  },
-  diameterInfo: {
-    fontSize: 16,
-    color: 'rgba(255, 255, 255, 0.9)',
-    marginTop: 5,
-  },
+  statusGradient: { padding: 30, alignItems: 'center' },
+  statusText: { fontSize: 24, fontWeight: 'bold', color: 'white', marginTop: 10 },
+  diameterInfo: { fontSize: 16, color: 'rgba(255,255,255,0.9)', marginTop: 5 },
   visualizationCard: {
     backgroundColor: 'white',
     margin: 20,
@@ -302,16 +407,8 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.1,
     shadowRadius: 5,
   },
-  visualizationContainer: {
-    alignItems: 'center',
-    marginVertical: 20,
-  },
-  visualizationNote: {
-    textAlign: 'center',
-    color: '#666',
-    fontSize: 12,
-    fontStyle: 'italic',
-  },
+  visualizationContainer: { alignItems: 'center', marginVertical: 20 },
+  visualizationNote: { textAlign: 'center', color: '#666', fontSize: 12, fontStyle: 'italic' },
   resultsSection: {
     backgroundColor: 'white',
     margin: 20,
@@ -324,17 +421,8 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.1,
     shadowRadius: 5,
   },
-  sectionHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 20,
-  },
-  sectionTitle: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: '#333',
-    marginLeft: 10,
-  },
+  sectionHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 20 },
+  sectionTitle: { fontSize: 18, fontWeight: 'bold', color: '#333', marginLeft: 10 },
   resultItem: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -343,40 +431,15 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: '#F0F0F0',
   },
-  resultLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flex: 1,
-  },
-  resultIcon: {
-    marginRight: 10,
-  },
-  resultLabel: {
-    fontSize: 16,
-    color: '#666',
-  },
-  resultRight: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  resultValue: {
-    fontSize: 16,
-    fontWeight: '600',
-    marginRight: 8,
-  },
-  pass: {
-    color: '#4CAF50',
-  },
-  fail: {
-    color: '#f44336',
-  },
-  info: {
-    color: '#2196F3',
-  },
-  actionContainer: {
-    padding: 20,
-    paddingTop: 0,
-  },
+  resultLeft: { flexDirection: 'row', alignItems: 'center', flex: 1 },
+  resultIcon: { marginRight: 10 },
+  resultLabel: { fontSize: 16, color: '#666' },
+  resultRight: { flexDirection: 'row', alignItems: 'center' },
+  resultValue: { fontSize: 16, fontWeight: '600', marginRight: 8 },
+  pass: { color: '#4CAF50' },
+  fail: { color: '#f44336' },
+  info: { color: '#2196F3' },
+  actionContainer: { padding: 20, paddingTop: 0 },
   primaryButton: {
     marginBottom: 10,
     borderRadius: 15,
@@ -394,12 +457,7 @@ const styles = StyleSheet.create({
     paddingVertical: 18,
     paddingHorizontal: 30,
   },
-  buttonText: {
-    color: 'white',
-    fontSize: 16,
-    fontWeight: 'bold',
-    marginLeft: 10,
-  },
+  buttonText: { color: 'white', fontSize: 16, fontWeight: 'bold', marginLeft: 10 },
   secondaryButton: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -411,12 +469,11 @@ const styles = StyleSheet.create({
     borderWidth: 2,
     borderColor: '#0D47A1',
   },
-  secondaryButtonText: {
-    color: '#0D47A1',
-    fontSize: 16,
-    fontWeight: 'bold',
-    marginLeft: 10,
-  },
+  secondaryButtonText: { color: '#0D47A1', fontSize: 16, fontWeight: 'bold', marginLeft: 10 },
+  imageSection: { marginHorizontal: 20, marginTop: 10, marginBottom: 10 },
+  processedImage: { width: '100%', height: 220, borderRadius: 8, backgroundColor: '#E3E3E3', marginBottom: 10 },
+  value: { fontSize: 16, color: '#444', flexShrink: 1 },
+  retryText: { color: '#1976D2', fontSize: 16, textDecorationLine: 'underline', marginTop: 10 },
 });
 
 export default ResultsScreen;
